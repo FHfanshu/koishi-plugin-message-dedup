@@ -7,6 +7,8 @@ export interface Config {
   imageSimilarityThreshold: number
   linkExactMatch: boolean
   forwardContentMaxLength: number
+  forwardImageMatchMode: 'all' | 'majority'
+  forwardImageSimilarityThreshold: number
   retentionDays: number
   stickerDir: string
   sendMethod: 'koishi' | 'onebot'
@@ -38,6 +40,17 @@ export const Config: Schema<Config> = Schema.object({
     .min(100)
     .max(2000)
     .description('转发消息内容摘要最大长度'),
+  forwardImageMatchMode: Schema.union([
+    Schema.const('all').description('全部匹配'),
+    Schema.const('majority').description('过半匹配')
+  ])
+    .default('all')
+    .description('转发消息图片匹配模式：全部匹配要求所有图片相同，过半匹配只需超半数图片相同'),
+  forwardImageSimilarityThreshold: Schema.number()
+    .default(10)
+    .min(0)
+    .max(32)
+    .description('转发消息图片相似度阈值（百分比，0为完全相同）'),
   retentionDays: Schema.number()
     .default(7)
     .min(1)

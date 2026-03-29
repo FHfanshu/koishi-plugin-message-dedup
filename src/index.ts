@@ -1,7 +1,7 @@
 import { Context, Session, h } from 'koishi'
 import { Config } from './config'
 import { downloadAndHashImage, extractUrls, calculateStringHash, normalizeUrl } from './hash'
-import { extendDatabase, findDuplicate, saveRecord, cleanupOldRecords, DedupRecord } from './database'
+import { extendDatabase, findDuplicate, saveRecord, cleanupOldRecords, DedupRecord, compareForwardMessages, ForwardExtraInfo } from './database'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -259,7 +259,7 @@ async function processForward(
 ): Promise<DedupRecord | null> {
   try {
     if (config.debug) {
-      logger.info(`处理转发消息, elem: ${JSON.stringify(forwardElem, null, 2)}`)
+      logger.info(`处理转发消息, elem: ${JSON.stringify(forwardElem.attrs, null, 2)}`)
     }
 
     // 获取转发消息 ID
@@ -268,8 +268,12 @@ async function processForward(
       return null
     }
 
+    // 转发消息内容
+    let textParts: string[] = []
+    let images: Array<{ url: string; hash: string | null }> = []
+    let apiSuccess = false
+
     // 先尝试通过 OneBot API 获取转发消息内容
-    let content = ''
     if (session.platform === 'onebot' && session.bot?.internal) {
       const internal = session.bot.internal
 
@@ -299,43 +303,49 @@ async function processForward(
           if (forwardData) {
             const messages = extractMessagesArray(forwardData)
             if (messages && Array.isArray(messages) && messages.length > 0) {
+              apiSuccess = true
               if (config.debug) {
-                // 详细打印第一个 node 的结构，帮助调试
-                logger.info(`转发消息节点数量: ${messages.length}, 第一个节点结构: ${JSON.stringify(messages[0]).slice(0, 500)}`)
+                logger.info(`转发消息节点数量: ${messages.length}`)
               }
-              content = messages.map((node: any) => {
-                // 尝试多种字段获取消息内容
+
+              // 提取文本和图片
+              for (const node of messages) {
                 const msgArray = node.message || node.content || node.data
                 if (Array.isArray(msgArray)) {
-                  // 提取所有消息类型的内容摘要
-                  return msgArray.map((m: any) => {
+                  for (const m of msgArray) {
                     if (m.type === 'text') {
-                      return m.data?.text || m.text || ''
+                      textParts.push(m.data?.text || m.text || '')
                     }
                     if (m.type === 'image') {
                       const url = m.data?.url || m.data?.file || m.url || m.file || ''
-                      return url ? `[img:${url.slice(0, 50)}]` : '[img]'
+                      if (url) {
+                        // 下载图片并计算哈希
+                        let hash: string | null = null
+                        try {
+                          hash = await downloadAndHashImage(url, ctx)
+                          if (hash && isAbnormalHash(hash)) {
+                            if (config.debug) {
+                              logger.warn(`转发消息图片哈希异常，跳过: ${hash}`)
+                            }
+                            hash = null
+                          }
+                        } catch (err) {
+                          if (config.debug) {
+                            logger.warn(`转发消息图片下载失败: ${url.slice(0, 50)}...`)
+                          }
+                        }
+                        images.push({ url, hash })
+                      }
                     }
-                    if (m.type === 'video') {
-                      return '[video]'
-                    }
-                    if (m.type === 'forward') {
-                      return `[forward:${m.data?.id || m.id || ''}]`
-                    }
-                    return `[${m.type}]`
-                  }).join('')
+                  }
                 }
-                // 如果是字符串，直接返回
+                // 兼容字符串格式
                 if (typeof node.content === 'string') {
-                  return node.content
+                  textParts.push(node.content)
                 }
                 if (typeof node.text === 'string') {
-                  return node.text
+                  textParts.push(node.text)
                 }
-                return ''
-              }).join('\n')
-              if (config.debug) {
-                logger.info(`get_forward_msg成功获取内容, 长度: ${content.length}`)
               }
               break
             }
@@ -346,23 +356,28 @@ async function processForward(
       }
     }
 
-    // 如果 API 获取失败或内容为空白，使用 forwardId 作为去重标识
-    const trimmedContent = content.trim()
-    const hashSource = trimmedContent || forwardId
+    // 提取有效图片哈希列表
+    const imageHashes = images.filter(img => img.hash !== null).map(img => img.hash!)
+    const failedImages = images.filter(img => img.hash === null).length
+
+    // 计算文本哈希
+    const textContent = textParts.join('\n').trim()
+    const textToHash = textContent.slice(0, config.forwardContentMaxLength)
+    const textHash = textContent ? calculateStringHash(textToHash) : calculateStringHash(forwardId)
 
     if (config.debug) {
-      logger.info(`转发消息去重标识: ${hashSource.slice(0, 50)} (来源: ${trimmedContent ? 'API内容' : 'forwardId'})`)
-    }
-
-    const truncated = hashSource.slice(0, config.forwardContentMaxLength)
-    const hash = calculateStringHash(truncated)
-
-    if (config.debug) {
-      logger.info(`转发消息哈希: ${hash}`)
+      logger.info(`转发消息: 文本长度=${textToHash.length}, 图片=${imageHashes.length}, 失败=${failedImages}, API成功=${apiSuccess}`)
     }
 
     const guildId = session.guildId!
-    const duplicate = await findDuplicate(ctx, guildId, 'forward', hash)
+
+    // 使用新的比较函数查询重复消息
+    const duplicate = await compareForwardMessages(
+      ctx, guildId,
+      textHash, imageHashes,
+      config.forwardImageMatchMode,
+      config.forwardImageSimilarityThreshold
+    )
 
     if (duplicate) {
       if (config.debug) {
@@ -371,16 +386,26 @@ async function processForward(
       return duplicate
     }
 
+    // 保存记录
+    const extraInfo: ForwardExtraInfo = {
+      forwardId,
+      preview: textToHash.slice(0, 100),
+      textHash,
+      imageHashes,
+      imageCount: images.length,
+      failedImages
+    }
+
     await saveRecord(ctx, {
       guildId: session.guildId!,
       userId: session.userId!,
       username,
       timestamp: Date.now(),
       contentType: 'forward',
-      contentHash: hash,
+      contentHash: textHash,
       originalMessageId: session.messageId!,
-      originalContent: truncated.slice(0, 100),
-      extraInfo: JSON.stringify({ forwardId, preview: truncated.slice(0, 100) })
+      originalContent: textToHash.slice(0, 100),
+      extraInfo: JSON.stringify(extraInfo)
     })
 
     return null
