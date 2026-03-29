@@ -259,15 +259,42 @@ async function processForward(
         const internal = session.bot.internal
         let forwardData: any = null
 
+        // 尝试多种 payload 格式: { message_id }, { id }
+        const payloads = [
+          { message_id: forwardId },
+          { id: forwardId },
+        ]
+
         // 尝试多种 API 调用方式
-        if (typeof internal._get === 'function') {
-          forwardData = await internal._get('get_forward_msg', { message_id: forwardId })
-        } else if (typeof internal.request === 'function') {
-          forwardData = await internal.request('get_forward_msg', { message_id: forwardId })
-        } else if (typeof internal.callAction === 'function') {
-          forwardData = await internal.callAction('get_forward_msg', { message_id: forwardId })
-        } else if (typeof internal.getForwardMsg === 'function') {
-          forwardData = await internal.getForwardMsg(forwardId)
+        const callApi = async (action: string, params: any): Promise<any> => {
+          if (typeof internal._get === 'function') {
+            return await internal._get(action, params)
+          }
+          if (typeof internal.request === 'function') {
+            return await internal.request(action, params)
+          }
+          if (typeof internal.callAction === 'function') {
+            return await internal.callAction(action, params)
+          }
+          return null
+        }
+
+        for (const payload of payloads) {
+          try {
+            forwardData = await callApi('get_forward_msg', payload)
+            if (forwardData) break
+          } catch {
+            // 继续尝试下一个 payload
+          }
+        }
+
+        // 如果都失败，尝试 getForwardMsg 方法
+        if (!forwardData && typeof internal.getForwardMsg === 'function') {
+          try {
+            forwardData = await internal.getForwardMsg(forwardId)
+          } catch {
+            // 忽略错误
+          }
         }
 
         if (config.debug) {
