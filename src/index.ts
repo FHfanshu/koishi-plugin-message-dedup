@@ -32,6 +32,19 @@ export function apply(ctx: Context, config: Config) {
 
   // 中间件处理消息
   ctx.middleware(async (session, next) => {
+    // === 临时调试：打印图片/表情包元素详情 ===
+    const imgElements = session.elements?.filter(e => e.type === 'img') || []
+    if (imgElements.length > 0) {
+      logger.info('=== 图片/表情包元素调试 ===')
+      for (const elem of imgElements) {
+        logger.info(`元素类型: ${elem.type}`)
+        logger.info(`attrs: ${JSON.stringify(elem.attrs, null, 2)}`)
+      }
+      logger.info('=== 原始 session.content ===')
+      logger.info(session.content)
+    }
+    // === 调试结束 ===
+
     // 只处理群消息
     if (!session.guildId) return next()
 
@@ -246,98 +259,77 @@ async function processForward(
       logger.info(`处理转发消息, elem: ${JSON.stringify(forwardElem, null, 2)}`)
     }
 
-    // 直接通过OneBot API获取转发消息内容
-    let content = ''
-    if (forwardElem.attrs?.id && session.platform === 'onebot' && session.bot?.internal) {
-      try {
-        const forwardId = forwardElem.attrs.id
-        if (config.debug) {
-          logger.info(`调用get_forward_msg获取转发内容, id: ${forwardId}`)
-        }
-
-        // 使用与 chatluna-forward-msg 相同的 API 调用方式
-        const internal = session.bot.internal
-        let forwardData: any = null
-
-        // 尝试多种 payload 格式: { message_id }, { id }
-        const payloads = [
-          { message_id: forwardId },
-          { id: forwardId },
-        ]
-
-        // 尝试多种 API 调用方式
-        const callApi = async (action: string, params: any): Promise<any> => {
-          if (typeof internal._get === 'function') {
-            return await internal._get(action, params)
-          }
-          if (typeof internal.request === 'function') {
-            return await internal.request(action, params)
-          }
-          if (typeof internal.callAction === 'function') {
-            return await internal.callAction(action, params)
-          }
-          return null
-        }
-
-        for (const payload of payloads) {
-          try {
-            forwardData = await callApi('get_forward_msg', payload)
-            if (forwardData) break
-          } catch {
-            // 继续尝试下一个 payload
-          }
-        }
-
-        // 如果都失败，尝试 getForwardMsg 方法
-        if (!forwardData && typeof internal.getForwardMsg === 'function') {
-          try {
-            forwardData = await internal.getForwardMsg(forwardId)
-          } catch {
-            // 忽略错误
-          }
-        }
-
-        if (config.debug) {
-          logger.info(`get_forward_msg原始返回: ${JSON.stringify(forwardData).slice(0, 500)}`)
-        }
-
-        // 从多种可能的数据结构中提取 messages 数组
-        const messages = extractMessagesArray(forwardData)
-        if (messages && Array.isArray(messages)) {
-          content = messages.map((node: any) => {
-            if (node.message) {
-              return node.message
-                .filter((m: any) => m.type === 'text')
-                .map((m: any) => m.data?.text || '')
-                .join('')
-            }
-            return ''
-          }).join('\n')
-        }
-
-        if (config.debug) {
-          logger.info(`get_forward_msg解析后内容: "${content.slice(0, 200)}"`)
-        }
-      } catch (err) {
-        if (config.debug) {
-          logger.warn(`获取转发消息内容失败:`, err)
-        }
-        return null
-      }
-    } else {
-      // 非OneBot平台，尝试从元素中提取
-      content = extractForwardContent(forwardElem)
-    }
-
-    if (!content) {
+    // 获取转发消息 ID
+    const forwardId = forwardElem.attrs?.id
+    if (!forwardId) {
       return null
     }
 
-    const truncated = content.slice(0, config.forwardContentMaxLength)
+    // 先尝试通过 OneBot API 获取转发消息内容
+    let content = ''
+    if (session.platform === 'onebot' && session.bot?.internal) {
+      const internal = session.bot.internal
+
+      // 尝试多种 payload 格式
+      const payloads = [
+        { message_id: forwardId },
+        { id: forwardId },
+      ]
+
+      // 尝试多种 API 调用方式
+      const callApi = async (action: string, params: any): Promise<any> => {
+        if (typeof internal._get === 'function') {
+          return await internal._get(action, params)
+        }
+        if (typeof internal.request === 'function') {
+          return await internal.request(action, params)
+        }
+        if (typeof internal.callAction === 'function') {
+          return await internal.callAction(action, params)
+        }
+        return null
+      }
+
+      for (const payload of payloads) {
+        try {
+          const forwardData = await callApi('get_forward_msg', payload)
+          if (forwardData) {
+            const messages = extractMessagesArray(forwardData)
+            if (messages && Array.isArray(messages) && messages.length > 0) {
+              content = messages.map((node: any) => {
+                if (node.message) {
+                  return node.message
+                    .filter((m: any) => m.type === 'text')
+                    .map((m: any) => m.data?.text || '')
+                    .join('')
+                }
+                return ''
+              }).join('\n')
+              if (config.debug) {
+                logger.info(`get_forward_msg成功获取内容, 长度: ${content.length}`)
+              }
+              break
+            }
+          }
+        } catch (err) {
+          // API 调用失败，继续尝试
+        }
+      }
+    }
+
+    // 如果 API 获取失败，直接用 forwardId 作为去重标识
+    // 同一内容的转发消息在不同用户发送时应该有相同的 ID
+    const hashSource = content || forwardId
+
+    if (config.debug) {
+      logger.info(`转发消息去重标识: ${hashSource.slice(0, 50)} (来源: ${content ? 'API内容' : 'forwardId'})`)
+    }
+
+    const truncated = hashSource.slice(0, config.forwardContentMaxLength)
     const hash = calculateStringHash(truncated)
 
     if (config.debug) {
-      logger.info(`转发消息哈希: ${hash}, 内容长度: ${content.length}`)
+      logger.info(`转发消息哈希: ${hash}`)
     }
 
     const guildId = session.guildId!
@@ -359,7 +351,7 @@ async function processForward(
       contentHash: hash,
       originalMessageId: session.messageId!,
       originalContent: truncated.slice(0, 100),
-      extraInfo: JSON.stringify({ preview: truncated.slice(0, 100) })
+      extraInfo: JSON.stringify({ forwardId, preview: truncated.slice(0, 100) })
     })
 
     return null
