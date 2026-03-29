@@ -2,7 +2,9 @@
 
 Koishi 消息去重插件，检测群内重复的图片、链接、聊天记录。
 
-![](assets/dup-1.jpg)
+<p align="center">
+  <img src="assets/dup-1.jpg" width="200">
+</p>
 
 ## 功能
 
