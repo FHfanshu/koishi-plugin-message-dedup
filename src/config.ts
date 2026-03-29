@@ -17,8 +17,8 @@ export interface Config {
 
 export const Config: Schema<Config> = Schema.object({
   enableImage: Schema.boolean()
-    .default(false)
-    .description('启用图片去重（默认关闭，可能误判表情包）'),
+    .default(true)
+    .description('启用图片去重（自动排除表情包）'),
   enableLink: Schema.boolean()
     .default(true)
     .description('启用链接去重'),

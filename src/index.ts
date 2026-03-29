@@ -32,19 +32,6 @@ export function apply(ctx: Context, config: Config) {
 
   // 中间件处理消息
   ctx.middleware(async (session, next) => {
-    // === 临时调试：打印图片/表情包元素详情 ===
-    const imgElements = session.elements?.filter(e => e.type === 'img') || []
-    if (imgElements.length > 0) {
-      logger.info('=== 图片/表情包元素调试 ===')
-      for (const elem of imgElements) {
-        logger.info(`元素类型: ${elem.type}`)
-        logger.info(`attrs: ${JSON.stringify(elem.attrs, null, 2)}`)
-      }
-      logger.info('=== 原始 session.content ===')
-      logger.info(session.content)
-    }
-    // === 调试结束 ===
-
     // 只处理群消息
     if (!session.guildId) return next()
 
@@ -84,10 +71,18 @@ async function processMessage(
   const username = session.author?.nickname || session.author?.username || session.username || '未知用户'
   const originalContent = session.content || extractTextFromElements(elements) || ''
 
-  // 1. 检查图片
+  // 1. 检查图片（排除表情包：subType=1）
   if (config.enableImage) {
     for (const elem of elements) {
       if (elem.type === 'img' && elem.attrs?.src) {
+        // 表情包 subType 为 1，跳过
+        const subType = elem.attrs['sub-type'] ?? elem.attrs.subType
+        if (subType === 1 || subType === '1') {
+          if (config.debug) {
+            logger.info('跳过表情包')
+          }
+          continue
+        }
         const duplicate = await processImage(
           elem.attrs.src, session, username, originalContent, config, ctx, logger
         )
