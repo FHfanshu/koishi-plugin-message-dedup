@@ -45,10 +45,13 @@ export async function findDuplicate(
   contentHash: string,
   imageThreshold?: number
 ): Promise<DedupRecord | null> {
-  const records = await ctx.database.get('message_dedup', {
+  let records = await ctx.database.get('message_dedup', {
     guildId,
     contentType
   })
+
+  // 按时间戳升序排序，确保返回最早匹配的记录（原消息）
+  records = records.sort((a, b) => a.timestamp - b.timestamp)
 
   if (contentType === 'image' && imageThreshold !== undefined) {
     // 图片需要计算汉明距离

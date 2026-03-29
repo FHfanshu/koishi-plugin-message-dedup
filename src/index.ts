@@ -155,6 +155,14 @@ async function processImage(
       return null
     }
 
+    // 检测异常哈希（如全0或几乎全0），跳过处理避免误判
+    if (isAbnormalHash(hash)) {
+      if (config.debug) {
+        logger.warn(`异常图片哈希，跳过: ${hash}`)
+      }
+      return null
+    }
+
     if (config.debug) {
       logger.info(`图片哈希: ${hash}`)
     }
@@ -291,12 +299,38 @@ async function processForward(
           if (forwardData) {
             const messages = extractMessagesArray(forwardData)
             if (messages && Array.isArray(messages) && messages.length > 0) {
+              if (config.debug) {
+                // 详细打印第一个 node 的结构，帮助调试
+                logger.info(`转发消息节点数量: ${messages.length}, 第一个节点结构: ${JSON.stringify(messages[0]).slice(0, 500)}`)
+              }
               content = messages.map((node: any) => {
-                if (node.message) {
-                  return node.message
-                    .filter((m: any) => m.type === 'text')
-                    .map((m: any) => m.data?.text || '')
-                    .join('')
+                // 尝试多种字段获取消息内容
+                const msgArray = node.message || node.content || node.data
+                if (Array.isArray(msgArray)) {
+                  // 提取所有消息类型的内容摘要
+                  return msgArray.map((m: any) => {
+                    if (m.type === 'text') {
+                      return m.data?.text || m.text || ''
+                    }
+                    if (m.type === 'image') {
+                      const url = m.data?.url || m.data?.file || m.url || m.file || ''
+                      return url ? `[img:${url.slice(0, 50)}]` : '[img]'
+                    }
+                    if (m.type === 'video') {
+                      return '[video]'
+                    }
+                    if (m.type === 'forward') {
+                      return `[forward:${m.data?.id || m.id || ''}]`
+                    }
+                    return `[${m.type}]`
+                  }).join('')
+                }
+                // 如果是字符串，直接返回
+                if (typeof node.content === 'string') {
+                  return node.content
+                }
+                if (typeof node.text === 'string') {
+                  return node.text
                 }
                 return ''
               }).join('\n')
@@ -312,12 +346,12 @@ async function processForward(
       }
     }
 
-    // 如果 API 获取失败，直接用 forwardId 作为去重标识
-    // 同一内容的转发消息在不同用户发送时应该有相同的 ID
-    const hashSource = content || forwardId
+    // 如果 API 获取失败或内容为空白，使用 forwardId 作为去重标识
+    const trimmedContent = content.trim()
+    const hashSource = trimmedContent || forwardId
 
     if (config.debug) {
-      logger.info(`转发消息去重标识: ${hashSource.slice(0, 50)} (来源: ${content ? 'API内容' : 'forwardId'})`)
+      logger.info(`转发消息去重标识: ${hashSource.slice(0, 50)} (来源: ${trimmedContent ? 'API内容' : 'forwardId'})`)
     }
 
     const truncated = hashSource.slice(0, config.forwardContentMaxLength)
@@ -487,4 +521,36 @@ function getRandomSticker(baseDir: string, stickerDir: string): string | null {
   }
 
   return null
+}
+
+/**
+ * 检测哈希是否异常（如几乎全0或全1）
+ * 异常哈希会导致误判，应跳过处理
+ */
+function isAbnormalHash(hash: string): boolean {
+  // pHash 通常是64位十六进制或二进制
+  // 统计0和1的比例，如果比例极端则认为异常
+
+  // 如果是二进制格式（64位）
+  if (hash.length === 64 && /^[01]+$/.test(hash)) {
+    const zeros = hash.split('0').length - 1
+    const ones = hash.split('1').length - 1
+    // 如果超过90%是同一个值，认为异常
+    if (zeros >= 58 || ones >= 58) {
+      return true
+    }
+  }
+
+  // 如果是十六进制格式
+  if (/^[0-9a-fA-F]+$/.test(hash)) {
+    // 检查是否几乎全是0或几乎全是f
+    const nonZeroCount = hash.replace(/0/gi, '').length
+    const nonFCount = hash.replace(/f/gi, '').length
+    // 如果超过90%是同一个值
+    if (nonZeroCount <= hash.length * 0.1 || nonFCount <= hash.length * 0.1) {
+      return true
+    }
+  }
+
+  return false
 }
