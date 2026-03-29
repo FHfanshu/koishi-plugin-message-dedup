@@ -97,6 +97,9 @@ async function processMessage(
 
   // 3. 检查转发消息
   if (config.enableForward) {
+    if (config.debug) {
+      logger.info(`检查转发消息, elements types: ${elements.map(e => e.type).join(', ')}`)
+    }
     for (const elem of elements) {
       if (elem.type === 'forward') {
         const duplicate = await processForward(
@@ -239,8 +242,67 @@ async function processForward(
   logger: any
 ): Promise<DedupRecord | null> {
   try {
-    const content = extractForwardContent(forwardElem)
-    if (!content || content.length < 10) {
+    if (config.debug) {
+      logger.info(`处理转发消息, elem: ${JSON.stringify(forwardElem, null, 2)}`)
+    }
+
+    // 直接通过OneBot API获取转发消息内容
+    let content = ''
+    if (forwardElem.attrs?.id && session.platform === 'onebot' && session.bot?.internal) {
+      try {
+        const forwardId = forwardElem.attrs.id
+        if (config.debug) {
+          logger.info(`调用get_forward_msg获取转发内容, id: ${forwardId}`)
+        }
+
+        // 使用与 chatluna-forward-msg 相同的 API 调用方式
+        const internal = session.bot.internal
+        let forwardData: any = null
+
+        // 尝试多种 API 调用方式
+        if (typeof internal._get === 'function') {
+          forwardData = await internal._get('get_forward_msg', { message_id: forwardId })
+        } else if (typeof internal.request === 'function') {
+          forwardData = await internal.request('get_forward_msg', { message_id: forwardId })
+        } else if (typeof internal.callAction === 'function') {
+          forwardData = await internal.callAction('get_forward_msg', { message_id: forwardId })
+        } else if (typeof internal.getForwardMsg === 'function') {
+          forwardData = await internal.getForwardMsg(forwardId)
+        }
+
+        if (config.debug) {
+          logger.info(`get_forward_msg原始返回: ${JSON.stringify(forwardData).slice(0, 500)}`)
+        }
+
+        // 从多种可能的数据结构中提取 messages 数组
+        const messages = extractMessagesArray(forwardData)
+        if (messages && Array.isArray(messages)) {
+          content = messages.map((node: any) => {
+            if (node.message) {
+              return node.message
+                .filter((m: any) => m.type === 'text')
+                .map((m: any) => m.data?.text || '')
+                .join('')
+            }
+            return ''
+          }).join('\n')
+        }
+
+        if (config.debug) {
+          logger.info(`get_forward_msg解析后内容: "${content.slice(0, 200)}"`)
+        }
+      } catch (err) {
+        if (config.debug) {
+          logger.warn(`获取转发消息内容失败:`, err)
+        }
+        return null
+      }
+    } else {
+      // 非OneBot平台，尝试从元素中提取
+      content = extractForwardContent(forwardElem)
+    }
+
+    if (!content) {
       return null
     }
 
@@ -300,6 +362,29 @@ function extractForwardContent(elem: h): string {
   }
 
   return content
+}
+
+/**
+ * 从多种可能的数据结构中提取 messages 数组
+ * 参考 chatluna-forward-msg 的实现
+ */
+function extractMessagesArray(data: any): any[] | null {
+  const candidates = [
+    data,
+    data?.messages,
+    data?.data,
+    data?.result,
+    data?.response,
+    data?.data?.messages,
+    data?.response?.messages,
+    data?.envelope?.result?.messages,
+  ]
+  for (const item of candidates) {
+    if (Array.isArray(item)) {
+      return item
+    }
+  }
+  return null
 }
 
 async function sendDuplicateWarning(
