@@ -168,8 +168,10 @@ async function processImage(
     }
 
     const guildId = session.guildId!
+    const currentTime = Date.now()
     const duplicate = await findDuplicate(
-      ctx, guildId, 'image', hash, config.imageSimilarityThreshold
+      ctx, guildId, 'image', hash, config.imageSimilarityThreshold,
+      session.userId, currentTime
     )
 
     if (duplicate) {
@@ -218,7 +220,9 @@ async function processLink(
     }
 
     const guildId = session.guildId!
-    const duplicate = await findDuplicate(ctx, guildId, 'link', hash)
+    const currentTime = Date.now()
+    const duplicate = await findDuplicate(ctx, guildId, 'link', hash,
+      undefined, session.userId, currentTime)
 
     if (duplicate) {
       if (config.debug) {
@@ -370,13 +374,15 @@ async function processForward(
     }
 
     const guildId = session.guildId!
+    const currentTime = Date.now()
 
     // 使用新的比较函数查询重复消息
     const duplicate = await compareForwardMessages(
       ctx, guildId,
       textHash, imageHashes,
       config.forwardImageMatchMode,
-      config.forwardImageSimilarityThreshold
+      config.forwardImageSimilarityThreshold,
+      session.userId, currentTime
     )
 
     if (duplicate) {

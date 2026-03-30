@@ -50,12 +50,20 @@ export function extendDatabase(ctx: Context) {
   })
 }
 
+/**
+ * 同一用户自身重复的时间窗口（毫秒）
+ * 在此时间窗口内，同一用户的重复消息不会被判定为重复
+ */
+const SELF_DUPE_WINDOW_MS = 5 * 60 * 1000 // 5分钟
+
 export async function findDuplicate(
   ctx: Context,
   guildId: string,
   contentType: 'image' | 'link' | 'forward',
   contentHash: string,
-  imageThreshold?: number
+  imageThreshold?: number,
+  currentUserId?: string,
+  currentTime?: number
 ): Promise<DedupRecord | null> {
   let records = await ctx.database.get('message_dedup', {
     guildId,
@@ -71,6 +79,12 @@ export async function findDuplicate(
     // threshold是百分比阈值（如10表示10%）
     const thresholdRatio = imageThreshold / 100
     for (const record of records) {
+      // 同一用户 5 分钟内的重复不算重复
+      if (currentUserId && currentTime &&
+          record.userId === currentUserId &&
+          currentTime - record.timestamp <= SELF_DUPE_WINDOW_MS) {
+        continue
+      }
       try {
         const distance = calculateHashDistance(contentHash, record.contentHash)
         if (distance <= thresholdRatio) {
@@ -83,7 +97,15 @@ export async function findDuplicate(
     }
   } else {
     // 链接和转发消息直接匹配哈希
-    return records.find(r => r.contentHash === contentHash) || null
+    return records.find(r => {
+      // 同一用户 5 分钟内的重复不算重复
+      if (currentUserId && currentTime &&
+          r.userId === currentUserId &&
+          currentTime - r.timestamp <= SELF_DUPE_WINDOW_MS) {
+        return false
+      }
+      return r.contentHash === contentHash
+    }) || null
   }
 
   return null
@@ -110,7 +132,9 @@ export async function compareForwardMessages(
   newTextHash: string,
   newImageHashes: string[],
   imageMatchMode: 'all' | 'majority',
-  imageThreshold: number
+  imageThreshold: number,
+  currentUserId?: string,
+  currentTime?: number
 ): Promise<DedupRecord | null> {
   const records = await ctx.database.get('message_dedup', {
     guildId,
@@ -123,6 +147,13 @@ export async function compareForwardMessages(
   const thresholdRatio = imageThreshold / 100
 
   for (const record of sortedRecords) {
+    // 同一用户 5 分钟内的重复不算重复
+    if (currentUserId && currentTime &&
+        record.userId === currentUserId &&
+        currentTime - record.timestamp <= SELF_DUPE_WINDOW_MS) {
+      continue
+    }
+
     let extra: ForwardExtraInfo
     try {
       extra = JSON.parse(record.extraInfo)
