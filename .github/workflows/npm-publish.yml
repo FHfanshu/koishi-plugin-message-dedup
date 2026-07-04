@@ -1,0 +1,73 @@
+name: Publish to npm
+
+"on":
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "npm version argument: patch, minor, major, prerelease, or 1.2.3"
+        required: true
+        default: patch
+      tag:
+        description: "npm dist-tag"
+        required: true
+        default: latest
+      dry_run:
+        description: "Run npm publish --dry-run and skip git push"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Update npm CLI
+        run: npm install -g npm@latest
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Install dependencies
+        run: |
+          npm install --no-package-lock
+          if ! node -e "const p = require('./package.json'); process.exit((p.dependencies?.typescript || p.devDependencies?.typescript) ? 0 : 1)"; then
+            npm install --no-save --package-lock=false typescript @types/node
+          fi
+
+      - name: Bump package version
+        run: |
+          npm version "${{ inputs.version }}" -m "chore(release): %s"
+
+      - name: Build package
+        run: |
+          BUILD_SCRIPT=$(node -e "const scripts = require('./package.json').scripts || {}; if (scripts.build) process.stdout.write('build'); else if (scripts['build:server']) process.stdout.write('build:server'); else process.exit(1)")
+          npm run "$BUILD_SCRIPT"
+
+      - name: Publish dry run
+        if: ${{ inputs.dry_run == true }}
+        run: npm publish --dry-run --tag "${{ inputs.tag }}" --access public
+
+      - name: Publish to npm
+        if: ${{ inputs.dry_run != true }}
+        run: npm publish --tag "${{ inputs.tag }}" --access public
+
+      - name: Push release commit and tag
+        if: ${{ inputs.dry_run != true }}
+        run: git push origin HEAD --follow-tags
